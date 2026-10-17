@@ -67,6 +67,8 @@ nav.tabs{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:v
 nav.tabs .wrap{display:flex;gap:4px;overflow-x:auto;scrollbar-width:none}
 nav.tabs button{font:inherit;font-weight:700;font-size:.95rem;background:none;border:0;border-bottom:3px solid transparent;color:var(--muted);padding:12px 12px 9px;cursor:pointer;white-space:nowrap}
 nav.tabs button[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--ink)}
+nav.tabs button.backbtn{position:sticky;left:0;z-index:1;background:var(--surface);color:var(--ink);border-bottom:0;border-right:1px solid var(--rule);padding-inline:4px 14px;margin-right:2px}
+nav.tabs button.backbtn:disabled{color:var(--muted);opacity:.5;cursor:default}
 nav.tabs button.t-law{color:var(--law)}
 nav.tabs button.t-law[aria-selected="true"]{border-bottom-color:var(--law)}
 nav.tabs button.t-comp[aria-selected="true"]{border-bottom-color:var(--comp);color:var(--comp)}
@@ -203,6 +205,7 @@ footer{color:var(--muted);font-size:.85rem;padding-block:24px;border-top:1px sol
 
 <nav class="tabs" aria-label="Sections">
   <div class="wrap" role="tablist">
+    <button id="backBtn" class="backbtn" type="button" disabled aria-label="Go back one step">← Back</button>
     <button role="tab" data-tab="plan" aria-selected="true">Plan</button>
     <button role="tab" data-tab="laws" class="t-law" aria-selected="false">Delhi Laws</button>
     <button role="tab" data-tab="computer" class="t-comp" aria-selected="false">Computer</button>
@@ -1178,10 +1181,45 @@ footer{color:var(--muted);font-size:.85rem;padding-block:24px;border-top:1px sol
     if(name==='revise') onRvChange();
     if(!keepScroll) window.scrollTo({top:0});
   }
-  tabs.forEach(t=>t.onclick=()=>{show(t.dataset.tab); try{history.replaceState(null,'','#'+t.dataset.tab)}catch(e){}});
+  /* Back: one step at a time. Inside a running quiz it goes to the previous
+     question; otherwise to the previous screen, section or tab. Each step is
+     also a browser history entry, so the phone's own back button does the same. */
+  const quizzes={};
+  const curTab=()=>{const p=panels.find(p=>!p.hidden);return p?p.dataset.panel:'plan'};
+  const NAV={stack:[],hist:false};
+  const backBtn=document.getElementById('backBtn');
+  function canBack(){const q=quizzes[curTab()];return NAV.stack.length>0||!!(q&&q.running()&&q.index()>0)}
+  function updBack(){backBtn.disabled=!canBack()}
+  function navPush(hash){
+    const t=curTab(), q=quizzes[t];
+    NAV.stack.push({tab:t,y:window.scrollY,qz:q?q.state():null});
+    if(NAV.stack.length>200) NAV.stack.shift();
+    try{history.pushState({pp:NAV.stack.length},'',hash||location.hash||'#'+t);NAV.hist=true}catch(e){NAV.hist=false}
+    updBack();
+  }
+  function restore(st){
+    show(st.tab,true);
+    const q=quizzes[st.tab];
+    if(q&&st.qz==='setup'&&q.state()!=='setup') q.toSetup();
+    requestAnimationFrame(()=>window.scrollTo({top:st.y||0}));
+    updBack();
+  }
+  function stepQuizBack(){const q=quizzes[curTab()]; if(q&&q.running()&&q.index()>0){q.prev();return true} return false}
+  backBtn.onclick=()=>{
+    if(stepQuizBack()){updBack();return}
+    if(!NAV.stack.length) return;
+    if(NAV.hist){try{history.back();return}catch(e){}}
+    restore(NAV.stack.pop());
+  };
+  window.addEventListener('popstate',()=>{
+    if(stepQuizBack()){ try{history.pushState({pp:NAV.stack.length},'',location.hash)}catch(e){} updBack(); return; }
+    if(NAV.stack.length) restore(NAV.stack.pop());
+  });
+
+  tabs.forEach(t=>t.onclick=()=>{ if(t.dataset.tab===curTab()) return; navPush('#'+t.dataset.tab); show(t.dataset.tab); updBack(); });
 
   document.querySelectorAll('.subnav a').forEach(a=>a.addEventListener('click',e=>{
-    const el=document.getElementById(a.getAttribute('href').slice(1)); if(el){e.preventDefault(); el.scrollIntoView({behavior:'smooth',block:'start'});}
+    const el=document.getElementById(a.getAttribute('href').slice(1)); if(el){e.preventDefault(); navPush(); el.scrollIntoView({behavior:'smooth',block:'start'});}
   }));
 
   const saveBtn=id=>`<button class="savebtn" type="button" data-sv="${id}" aria-pressed="${isSaved(id)}">${isSaved(id)?'★ Saved':'☆ Save'}</button>`;
@@ -1197,6 +1235,7 @@ footer{color:var(--muted);font-size:.85rem;padding-block:24px;border-top:1px sol
     const fmt=s=>{s=Math.max(0,s);return String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0')};
 
     function begin(items,mode,time,neg){
+      navPush();
       S.items=items; S.pick=new Array(items.length).fill(null); S.flag=new Set(); S.i=0; S.done=false; S.running=true;
       S.mode=mode; S.time=time; S.neg=neg; clearInterval(S.tm);
       if(time){S.left=time; S.tm=setInterval(()=>{S.left--; const el=host.querySelector('.timer'); if(el){el.textContent=fmt(S.left); el.classList.toggle('low',S.left<300)} if(S.left<=0){clearInterval(S.tm); finish()}},1000)}
@@ -1405,12 +1444,17 @@ footer{color:var(--muted);font-size:.85rem;padding-block:24px;border-top:1px sol
       if(e.key==='ArrowLeft'&&S.i>0){S.i--;render()}
     });
     setup();
-    return {refresh(){ if(!S.running && !S.done) setup(); }, S};
+    return {refresh(){ if(!S.running && !S.done) setup(); }, S,
+      state(){return S.running?'run':S.done?'done':'setup'},
+      toSetup(){clearInterval(S.tm); S.running=false; S.done=false; setup()},
+      running(){return !!S.running}, index(){return S.i||0},
+      prev(){ if(S.running&&S.i>0){S.i--;render()} }};
   }
-  Quiz(document.getElementById('quiz-law'),{bank:'law',key:'law',cls:'law'});
-  Quiz(document.getElementById('quiz-comp'),{bank:'comp',key:'comp',cls:'comp'});
-  Quiz(document.getElementById('quiz-mock'),{mock:true,key:'mock',cls:''});
-  const rvQ=Quiz(document.getElementById('quiz-revise'),{revise:true,key:'rv',cls:''});
+  quizzes.lawq=Quiz(document.getElementById('quiz-law'),{bank:'law',key:'law',cls:'law'});
+  quizzes.compq=Quiz(document.getElementById('quiz-comp'),{bank:'comp',key:'comp',cls:'comp'});
+  quizzes.mock=Quiz(document.getElementById('quiz-mock'),{mock:true,key:'mock',cls:''});
+  const rvQ=quizzes.revise=Quiz(document.getElementById('quiz-revise'),{revise:true,key:'rv',cls:''});
+  document.addEventListener('click',()=>setTimeout(updBack,0));
   onRvChange=()=>{ if(!rvQ.S.running && !rvQ.S.done) rvQ.refresh(); };
 
   const h=(location.hash||'').slice(1);
